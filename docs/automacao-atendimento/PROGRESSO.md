@@ -27,3 +27,21 @@
 - Criar fork próprio no GitHub e apontar o `origin` para ele (sem mudar a visibilidade).
 - `gh` está instalado, mas sem login (`gh auth login`); o acesso às Actions ainda não foi verificado.
 - Nenhuma configuração remota e nenhum ticket de teste nesta etapa. Usar só dados fictícios.
+
+## Etapa 01 — Agentes (2026-11-11)
+
+**Remote:** `origin` agora é https://github.com/joicezanela/trello-clone (repositório próprio).
+A ligação com o repositório do professor foi removida. `main` acompanha `origin/main`.
+
+### Agentes criados em `.github/agents/`
+| Arquivo | Papel | Mexe em código? |
+|---|---|---|
+| `triagem.agent.md` | Classifica tickets `open` (categoria, prioridade, próximo passo) com nota `system` | Não |
+| `atendente.agent.md` | Responde ao usuário com `role: "agent"` e encerra quando confirmado | Não |
+| `desenvolvedor.agent.md` | Corrige bug/melhoria em branch `ticket/...`, com teste e `npm test` | Sim |
+
+Fluxo: ticket `open` → **triagem** → **atendente** (dúvida/incompleto) ou **desenvolvedor** (bug/melhoria) → atendente avisa o usuário → `resolved`.
+
+### Pendências
+- Commit só local; `push` aguarda login no GitHub (`gh auth login`).
+- Execução automática dos agentes (Actions + `ANTHROPIC_API_KEY`) ainda não configurada.
