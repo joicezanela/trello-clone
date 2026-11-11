@@ -1,0 +1,158 @@
+# Atendimento do app → issue (origin:app) → coordenador com a API da IA configurada.
+# Roda só com AGENT_RUNTIME=github-actions. AGENT_DRY_RUN fica "true" (padrão) até o ensaio.
+# Variáveis (Settings → Secrets and variables → Actions → Variables):
+#   AGENT_RUNTIME=github-actions  AGENT_DRY_RUN=true  APP_ISSUE_AUTHOR=<login do backend>
+#   AI_PROVIDER=anthropic  AI_MODEL=<modelo>  AI_BASE_URL=<opcional>
+# Secret: AI_API_KEY (entregue só ao passo "Chamar a IA").
+name: ai-agents
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Número da issue
+        required: true
+        type: string
+      retomar:
+        description: Retomar uma rodada marcada como incerta (pode gerar nova chamada paga)
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Uma execução por issue de cada vez; nunca cancela a que está rodando.
+concurrency:
+  group: ai-agents-issue-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+env:
+  ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+
+jobs:
+  coordenador:
+    if: >-
+      vars.AGENT_RUNTIME == 'github-actions' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'origin:app')) ||
+       (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+        contains(github.event.issue.labels.*.name, 'origin:app') &&
+        github.event.comment.user.login == vars.APP_ISSUE_AUTHOR))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      abrir_pr: ${{ steps.concluir.outputs.abrir_pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Preparar (validar issue, ler estado, registrar requestId/resultPath)
+        id: preparar
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APP_ISSUE_AUTHOR: ${{ vars.APP_ISSUE_AUTHOR }}
+          RETOMAR: ${{ inputs.retomar || false }}
+        run: node automacao/controlador.mjs preparar
+
+      - name: Instalar SDK oficial do provedor
+        if: steps.preparar.outputs.prosseguir == 'true' && vars.AGENT_DRY_RUN == 'false' && vars.AI_PROVIDER == 'anthropic'
+        run: npm install --no-save --ignore-scripts --no-audit --no-fund @anthropic-ai/sdk@1.3.0
+
+      - name: Chamar a IA (coordenador)
+        id: ia
+        if: steps.preparar.outputs.prosseguir == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          AGENT_DRY_RUN: ${{ vars.AGENT_DRY_RUN || 'true' }}
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: node automacao/controlador.mjs chamar-ia
+
+      - name: Concluir (validar fora do modelo, publicar resumo e mensagem do N1)
+        id: concluir
+        if: always() && steps.preparar.outputs.prosseguir == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node automacao/controlador.mjs concluir
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.preparar.outputs.prosseguir == 'true'
+        with:
+          name: resultado-${{ env.ISSUE_NUMBER }}-${{ github.run_id }}
+          path: resultado
+          retention-days: 7
+
+  abrir-pr:
+    needs: coordenador
+    if: needs.coordenador.outputs.abrir_pr == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      branch: ${{ steps.pr.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: resultado-${{ env.ISSUE_NUMBER }}-${{ github.run_id }}
+          path: resultado
+      - name: Abrir PR só com arquivos permitidos (sem merge)
+        id: pr
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node automacao/controlador.mjs abrir-pr
+
+  # Código proposto roda aqui: sem segredos, só leitura.
+  build-pr:
+    needs: abrir-pr
+    if: needs.abrir-pr.outputs.branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.abrir-pr.outputs.branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+
+  registrar-build:
+    needs: [abrir-pr, build-pr]
+    if: always() && needs.abrir-pr.outputs.branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Anotar resultado do build na issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.build-pr.result }}
+        run: node automacao/controlador.mjs registrar-build

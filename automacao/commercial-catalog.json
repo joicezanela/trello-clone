@@ -1,0 +1,17 @@
+{
+  "produto": "Fluxo",
+  "descricao": "Quadro de tarefas no estilo Trello: quadros, listas e cartões, com atendimento por tickets.",
+  "recursos": [
+    "Criar, renomear e excluir quadros",
+    "Criar, renomear e excluir listas",
+    "Criar, editar (título e descrição), excluir e mover cartões",
+    "Arrastar cartões entre listas",
+    "Atendimento por tickets dentro do app"
+  ],
+  "execucao": "Local: interface React/Vite, API Node 22.13+ e banco SQLite.",
+  "precos": null,
+  "planos": null,
+  "prazos": null,
+  "contato_comercial": null,
+  "observacao": "Campos null não são conhecidos. Não informe valores; pergunte o que a pessoa precisa e encaminhe para uma pessoa."
+}

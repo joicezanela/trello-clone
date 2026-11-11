@@ -85,6 +85,18 @@ const MIGRACOES = [
       '2. **Pelo menu do cartão**: abra o menu \`⋮\` e escolha **Mover para**.' || char(10) || char(10) ||
       'Se precisar de mais alguma coisa, é só responder aqui.',
       '2026-11-10T13:02:00.000Z');`,
+  // Vínculo ticket ↔ issue do GitHub (automação). Só o necessário para retomar e reconciliar.
+  `CREATE TABLE ticket_github (
+     ticket_id TEXT PRIMARY KEY REFERENCES ticket(id) ON DELETE CASCADE,
+     issue INTEGER,
+     request_id TEXT,
+     run_id TEXT,
+     result_path TEXT,
+     pr_url TEXT,
+     fase TEXT NOT NULL DEFAULT 'pendente',
+     mensagens_enviadas TEXT NOT NULL DEFAULT '[]',
+     sincronizado_em TEXT
+   )`,
 ];
 
 /** `caminho` = arquivo do banco; `:memory:` nos testes. */

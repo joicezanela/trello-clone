@@ -45,3 +45,23 @@ Fluxo: ticket `open` → **triagem** → **atendente** (dúvida/incompleto) ou *
 ### Pendências
 - Commit só local; `push` aguarda login no GitHub (`gh auth login`).
 - Execução automática dos agentes (Actions + `ANTHROPIC_API_KEY`) ainda não configurada.
+
+## Etapa 01 — Contexto e limites (2026-11-11)
+
+- `docs/automacao-atendimento/PRODUTO.md`: o que o app faz e como usar (conferido com `client/src`).
+- `docs/automacao-atendimento/POLITICA-DE-AUTONOMIA.md`: o que os agents podem fazer e caminhos permitidos.
+- `automacao/commercial-catalog.json`: só recursos reais; preço, planos, prazos e contato ficam `null` (não informados).
+- Pendente: os `.agent.md` ainda não citam esses arquivos.
+
+## Etapa 02 — Equipe de agents (2026-11-11)
+
+- Criados em `.github/agents/`: `coordenador`, `n1`, `comercial`, `po`, `desenvolvedor` (substitui o da Etapa 01), `revisor`.
+- Coordenador chama os especialistas pela ferramenta `agent` e grava o relatório JSON (`requestId`, `outcome`, `publicText`, `agents`, `allowedFiles`, `criteria`, `updates`) em `resultPath`.
+- Sem `target: github-copilot` (usamos Claude). `triagem` e `atendente` continuam como estavam.
+- Pendente: controlador que envia `requestId`/`resultPath` e executa o coordenador ainda não existe.
+
+## Etapa 03 — App → issue → coordenador via Actions (2026-11-11)
+
+- Backend (`server/src/github.js`, `tickets.js`): com `AGENT_RUNTIME=github-actions`, ticket novo cria issue `origin:app` (vínculo em `ticket_github` no SQLite), mensagens do cliente viram comentário, e há dispatch explícito do workflow. Ao abrir o ticket, o backend lê o comentário de controle (no máximo a cada 20 s) e traz a mensagem do N1.
+- `.github/workflows/ai-agents.yml` + `automacao/controlador.mjs`: valida issue (label + autor `APP_ISSUE_AUTHOR` + marcador do ticket), serializa por issue, grava estado num comentário de controle, chama a IA (máx. 2 chamadas, 120 s, sem retry), valida o relatório fora do modelo, abre PR só em caminhos permitidos (job separado) e faz o build sem segredos.
+- Verificado localmente com GitHub falso e dry-run; build e `npm test` ok. Nenhuma chamada real ao GitHub ou à IA.

@@ -43,7 +43,7 @@ export function tituloDaMensagem(conteudo) {
   return limpa.length > 80 ? `${limpa.slice(0, 77).trimEnd()}…` : limpa;
 }
 
-export function rotasDeTickets(app, db) {
+export function rotasDeTickets(app, db, integracao = null) {
   const buscar = (id) => {
     const t = db.prepare("SELECT * FROM ticket WHERE id = ?").get(id);
     if (!t) throw naoEncontrado("Ticket");
@@ -53,9 +53,12 @@ export function rotasDeTickets(app, db) {
     db.prepare("SELECT role, content FROM ticket_mensagem WHERE ticket_id = ? ORDER BY criado_em DESC, rowid DESC LIMIT 1").get(ticketId);
   const mensagens = (ticketId) =>
     db.prepare("SELECT * FROM ticket_mensagem WHERE ticket_id = ? ORDER BY criado_em, rowid").all(ticketId).map(saidaMensagem);
+  const vinculo = (ticketId) => db.prepare("SELECT * FROM ticket_github WHERE ticket_id = ?").get(ticketId);
   const completo = (id) => {
     const t = buscar(id);
-    return { ticket: saidaTicket(t, ultimaMensagem(t.id)), messages: mensagens(t.id) };
+    const v = vinculo(t.id);
+    const github = v ? { issue: v.issue, phase: v.fase, requestId: v.request_id, pr: v.pr_url } : null;
+    return { ticket: saidaTicket(t, ultimaMensagem(t.id)), messages: mensagens(t.id), github };
   };
 
   const inserirMensagem = (ticketId, role, autor, conteudo, agora) => {
@@ -63,6 +66,43 @@ export function rotasDeTickets(app, db) {
     db.prepare("INSERT INTO ticket_mensagem (id, ticket_id, role, author_name, content, criado_em) VALUES (?, ?, ?, ?, ?, ?)")
       .run(id, ticketId, role, autor, conteudo, agora);
     return id;
+  };
+
+  // --- Integração com o GitHub (só quando AGENT_RUNTIME=github-actions) ---
+  const enviarParaGithub = async (ticketId) => {
+    const v = vinculo(ticketId);
+    if (!integracao || !v || v.issue) return;
+    const primeira = db.prepare("SELECT content FROM ticket_mensagem WHERE ticket_id = ? AND role = 'user' ORDER BY criado_em, rowid LIMIT 1").get(ticketId);
+    const issue = await integracao.criarIssue(buscar(ticketId), primeira?.content ?? "");
+    db.prepare("UPDATE ticket_github SET issue = ?, fase = 'enviado' WHERE ticket_id = ?").run(issue, ticketId);
+    await integracao.disparar(issue);
+  };
+
+  /** Traz o resultado do workflow (comentário de controle) para o app. No máximo a cada 20 s por ticket. */
+  const sincronizar = async (ticketId) => {
+    const v = vinculo(ticketId);
+    if (!integracao || !v || (v.sincronizado_em && Date.now() - Date.parse(v.sincronizado_em) < 20_000)) return;
+    db.prepare("UPDATE ticket_github SET sincronizado_em = ? WHERE ticket_id = ?").run(new Date().toISOString(), ticketId);
+    try {
+      if (!v.issue) return await enviarParaGithub(ticketId); // criação anterior falhou: tenta de novo
+      const estado = await integracao.lerEstado(v.issue);
+      if (!estado || estado.ticketId !== ticketId) return;
+      const enviados = new Set(JSON.parse(v.mensagens_enviadas));
+      const texto = (x) => (typeof x === "string" || typeof x === "number" ? String(x).slice(0, 300) : null);
+      transacao(db, () => {
+        for (const m of Array.isArray(estado.messages) ? estado.messages : []) {
+          if (typeof m?.id !== "string" || typeof m.text !== "string" || !m.text.trim() || m.text.length > 2000 || enviados.has(m.id)) continue;
+          const agora = new Date().toISOString();
+          inserirMensagem(ticketId, "agent", "Suporte N1", m.text.trim(), agora);
+          db.prepare("UPDATE ticket SET status = 'answered', atualizado_em = ? WHERE id = ?").run(agora, ticketId);
+          enviados.add(m.id);
+        }
+        db.prepare("UPDATE ticket_github SET request_id = ?, run_id = ?, result_path = ?, pr_url = ?, fase = ?, mensagens_enviadas = ? WHERE ticket_id = ?")
+          .run(texto(estado.requestId), texto(estado.runId), texto(estado.resultPath), texto(estado.pr), texto(estado.phase) ?? v.fase, JSON.stringify([...enviados]), ticketId);
+      });
+    } catch (e) {
+      console.error(`Sincronização do ticket ${ticketId} com o GitHub falhou: ${e.message}`);
+    }
   };
 
   const papelDoCorpo = (corpo) => {
@@ -77,7 +117,7 @@ export function rotasDeTickets(app, db) {
   }));
 
   /** Abre um ticket já com a primeira mensagem do usuário. `title` é opcional. */
-  app.post("/api/tickets", ({ corpo }) => {
+  app.post("/api/tickets", async ({ corpo }) => {
     const conteudo = texto(corpo, "message", { max: MAX_MENSAGEM });
     const titulo = texto(corpo, "title", { max: 120, opcional: true }) || tituloDaMensagem(conteudo);
     const autor = texto(corpo, "authorName", { min: 0, max: 120, opcional: true }) || "Você";
@@ -86,11 +126,20 @@ export function rotasDeTickets(app, db) {
     transacao(db, () => {
       db.prepare("INSERT INTO ticket (id, title, status, criado_em, atualizado_em) VALUES (?, ?, 'open', ?, ?)").run(id, titulo, agora, agora);
       inserirMensagem(id, "user", autor, conteudo, agora);
+      if (integracao) db.prepare("INSERT INTO ticket_github (ticket_id) VALUES (?)").run(id);
     });
+    if (integracao) {
+      try { await enviarParaGithub(id); }
+      catch (e) { console.error(`Não foi possível criar a issue do ticket ${id}: ${e.message}`); }
+    }
     return completo(id);
   });
 
-  app.get("/api/tickets/:id", ({ params }) => completo(params.id));
+  app.get("/api/tickets/:id", async ({ params }) => {
+    buscar(params.id);
+    await sincronizar(params.id);
+    return completo(params.id);
+  });
 
   app.patch("/api/tickets/:id", ({ params, corpo }) => {
     const t = buscar(params.id);
@@ -120,7 +169,7 @@ export function rotasDeTickets(app, db) {
    * Nova mensagem na conversa. Sem `role`, é do usuário.
    * Agentes autônomos respondem com `{ role: "agent", authorName: "Assistente", content }`.
    */
-  app.post("/api/tickets/:id/messages", ({ params, corpo }) => {
+  app.post("/api/tickets/:id/messages", async ({ params, corpo }) => {
     const t = buscar(params.id);
     const role = papelDoCorpo(corpo);
     const conteudo = texto(corpo, "content", { max: MAX_MENSAGEM });
@@ -133,6 +182,11 @@ export function rotasDeTickets(app, db) {
       db.prepare("UPDATE ticket SET status = ?, atualizado_em = ? WHERE id = ?").run(status, agora, t.id);
       return novo;
     });
+    const v = role === "user" && integracao ? vinculo(t.id) : null;
+    if (v?.issue) {
+      try { await integracao.comentar(v.issue, id, conteudo); await integracao.disparar(v.issue); }
+      catch (e) { console.error(`Não foi possível encaminhar a mensagem ao GitHub (ticket ${t.id}): ${e.message}`); }
+    }
     return {
       message: saidaMensagem(db.prepare("SELECT * FROM ticket_mensagem WHERE id = ?").get(id)),
       ticket: saidaTicket(buscar(t.id), ultimaMensagem(t.id)),
